@@ -1,8 +1,12 @@
-use std::io::{self, Write};
+use std::error::Error;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufRead};
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::Path;
 
-#[derive(Debug)]
+use serde::{Deserialize, Serialize};
+
+/// Represents a single task in the to-do list
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Task {
     description: String,
     completed: bool,
@@ -10,146 +14,141 @@ struct Task {
 }
 
 impl Task {
-    fn new(description: String, due_date: Option<String>) -> Self {
+    /// Creates a new task with the given description and optional due date
+    fn new(description: impl Into<String>, due_date: Option<String>) -> Self {
         Task {
-            description,
+            description: description.into(),
             completed: false,
             due_date,
         }
     }
 
+    /// Marks the task as completed
     fn mark_complete(&mut self) {
         self.completed = true;
     }
 
-    fn display(&self) {
-        println!(
-            "{} - [{}] {}",
-            if self.completed { "✓" } else { " " },
-            self.due_date.clone().unwrap_or("No Due Date".to_string()),
-            self.description
-        );
+    /// Displays the task in a formatted way
+    fn display(&self, index: usize) {
+        let status = if self.completed { "✓" } else { " " };
+        let due = self.due_date.as_deref().unwrap_or("No Due Date");
+        println!("{}. {} - [{}] {}", index, status, due, self.description);
     }
 }
 
+/// Manages a collection of tasks
 struct ToDoList {
     tasks: Vec<Task>,
 }
 
 impl ToDoList {
-    fn new() -> ToDoList {
+    /// Creates a new empty to-do list
+    fn new() -> Self {
         ToDoList { tasks: Vec::new() }
     }
 
+    /// Adds a new task to the list
     fn add_task(&mut self, description: String, due_date: Option<String>) {
         let task = Task::new(description, due_date);
         self.tasks.push(task);
         println!("Task added successfully!");
     }
 
-    fn remove_task(&mut self, index: usize) {
+    /// Removes a task at the specified index (0-based)
+    fn remove_task(&mut self, index: usize) -> Result<(), &'static str> {
         if index < self.tasks.len() {
             self.tasks.remove(index);
             println!("Task removed successfully!");
+            Ok(())
         } else {
-            println!("Invalid task index!");
+            Err("Invalid task index!")
         }
     }
 
+    /// Lists all tasks in the to-do list
     fn list_tasks(&self) {
         if self.tasks.is_empty() {
             println!("No tasks found!");
         } else {
-            println!("Your To-Do List:");
+            println!("\n=== Your To-Do List ===");
             for (i, task) in self.tasks.iter().enumerate() {
-                println!("{}. ", i + 1);
-                task.display();
+                task.display(i + 1);
             }
         }
     }
 
-    fn mark_complete(&mut self, index: usize) {
+    /// Marks a task as completed by index (0-based)
+    fn mark_complete(&mut self, index: usize) -> Result<(), &'static str> {
         if let Some(task) = self.tasks.get_mut(index) {
             task.mark_complete();
             println!("Task marked as completed!");
+            Ok(())
         } else {
-            println!("Invalid task index!");
+            Err("Invalid task index!")
         }
     }
 
-    fn save_to_file(&self) {
-        let mut file = OpenOptions::new()
+    /// Saves all tasks to a JSON file
+    fn save_to_file(&self, filename: &str) -> Result<(), Box<dyn Error>> {
+        let file = OpenOptions::new()
             .create(true)
-            .append(true)
-            .open("to_do_list.txt")
-            .expect("Unable to open file");
+            .write(true)
+            .truncate(true)
+            .open(filename)?;
 
-        for task in &self.tasks {
-            let task_data = format!(
-                "{}|{}|{}\n",
-                task.description,
-                task.completed,
-                task.due_date.clone().unwrap_or("".to_string())
-            );
-            file.write_all(task_data.as_bytes())
-                .expect("Unable to write data");
-        }
+        serde_json::to_writer_pretty(file, &self.tasks)?;
         println!("Tasks saved to file.");
+        Ok(())
     }
 
-    fn load_from_file(&mut self) {
-        let file = File::open("to_do_list.txt");
-        if file.is_ok() {
-            let reader = BufReader::new(file.unwrap());
-            for line in reader.lines() {
-                if let Ok(task_data) = line {
-                    let parts: Vec<&str> = task_data.split('|').collect();
-                    if parts.len() == 3 {
-                        let completed = parts[1] == "true";
-                        let due_date = if parts[2].is_empty() {
-                            None
-                        } else {
-                            Some(parts[2].to_string())
-                        };
-                        self.tasks.push(Task {
-                            description: parts[0].to_string(),
-                            completed,
-                            due_date,
-                        });
-                    }
-                }
-            }
-            println!("Tasks loaded from file.");
-        } else {
+    /// Loads tasks from a JSON file
+    fn load_from_file(&mut self, filename: &str) -> Result<(), Box<dyn Error>> {
+        if !Path::new(filename).exists() {
             println!("No saved tasks found.");
+            return Ok(());
         }
+
+        let file = File::open(filename)?;
+        let reader = BufReader::new(file);
+        
+        match serde_json::from_reader(reader) {
+            Ok(tasks) => {
+                self.tasks = tasks;
+                println!("Tasks loaded from file.");
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not parse tasks file: {}", e);
+                println!("Starting with empty task list.");
+            }
+        }
+        Ok(())
     }
 
-    // Sort tasks by completion status
+    /// Sorts tasks by completion status (incomplete first)
     fn sort_by_completion(&mut self) {
-        self.tasks.sort_by(|a, b| a.completed.cmp(&b.completed));
+        self.tasks.sort_by_key(|task| task.completed);
         println!("Tasks sorted by completion status.");
     }
 
-    // Filter tasks by due date
+    /// Filters and displays tasks by due date
     fn filter_by_due_date(&self, due_date: &str) {
-        let filtered_tasks: Vec<&Task> = self
+        let filtered: Vec<&Task> = self
             .tasks
             .iter()
             .filter(|task| task.due_date.as_deref() == Some(due_date))
             .collect();
 
-        if filtered_tasks.is_empty() {
+        if filtered.is_empty() {
             println!("No tasks found with due date: {}", due_date);
         } else {
-            println!("Filtered tasks with due date {}:", due_date);
-            for task in filtered_tasks {
-                task.display();
+            println!("\n=== Tasks due on {} ===", due_date);
+            for (i, task) in filtered.iter().enumerate() {
+                task.display(i + 1);
             }
         }
     }
 
-    // Mark all tasks as completed
+    /// Marks all tasks as completed
     fn mark_all_complete(&mut self) {
         for task in &mut self.tasks {
             task.mark_complete();
@@ -157,31 +156,33 @@ impl ToDoList {
         println!("All tasks marked as completed!");
     }
 
-    // Search tasks by description
+    /// Searches tasks by keyword in description
     fn search_tasks(&self, keyword: &str) {
-        let found_tasks: Vec<&Task> = self
+        let found: Vec<&Task> = self
             .tasks
             .iter()
-            .filter(|task| task.description.contains(keyword))
+            .filter(|task| task.description.to_lowercase().contains(&keyword.to_lowercase()))
             .collect();
 
-        if found_tasks.is_empty() {
+        if found.is_empty() {
             println!("No tasks found with keyword: {}", keyword);
         } else {
-            println!("Search results for '{}':", keyword);
-            for task in found_tasks {
-                task.display();
+            println!("\n=== Search results for '{}' ===", keyword);
+            for (i, task) in found.iter().enumerate() {
+                task.display(i + 1);
             }
         }
     }
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
+    const FILENAME: &str = "tasks.json";
+    
     let mut to_do_list = ToDoList::new();
-    to_do_list.load_from_file();
+    to_do_list.load_from_file(FILENAME)?;
 
     loop {
-        println!("\n==== To-Do List ====");
+        println!("\n==== To-Do List Manager ====");
         println!("1. Add Task");
         println!("2. Remove Task");
         println!("3. View Tasks");
@@ -194,23 +195,17 @@ fn main() {
         println!("10. Exit");
 
         let mut choice = String::new();
-        io::stdin()
-            .read_line(&mut choice)
-            .expect("Failed to read input");
+        io::stdin().read_line(&mut choice)?;
 
         match choice.trim() {
             "1" => {
                 println!("Enter the task description:");
                 let mut task_description = String::new();
-                io::stdin()
-                    .read_line(&mut task_description)
-                    .expect("Failed to read task description");
+                io::stdin().read_line(&mut task_description)?;
 
                 println!("Enter the due date (optional, format: YYYY-MM-DD):");
                 let mut due_date = String::new();
-                io::stdin()
-                    .read_line(&mut due_date)
-                    .expect("Failed to read due date");
+                io::stdin().read_line(&mut due_date)?;
 
                 let due_date = if due_date.trim().is_empty() {
                     None
@@ -223,13 +218,15 @@ fn main() {
             "2" => {
                 println!("Enter the task number to remove:");
                 let mut index = String::new();
-                io::stdin()
-                    .read_line(&mut index)
-                    .expect("Failed to read input");
-                if let Ok(index) = index.trim().parse::<usize>() {
-                    to_do_list.remove_task(index - 1);
-                } else {
-                    println!("Please enter a valid number!");
+                io::stdin().read_line(&mut index)?;
+                
+                match index.trim().parse::<usize>() {
+                    Ok(idx) => {
+                        if let Err(e) = to_do_list.remove_task(idx - 1) {
+                            println!("{}", e);
+                        }
+                    }
+                    Err(_) => println!("Please enter a valid number!"),
                 }
             }
             "3" => {
@@ -238,17 +235,21 @@ fn main() {
             "4" => {
                 println!("Enter the task number to mark as completed:");
                 let mut index = String::new();
-                io::stdin()
-                    .read_line(&mut index)
-                    .expect("Failed to read input");
-                if let Ok(index) = index.trim().parse::<usize>() {
-                    to_do_list.mark_complete(index - 1);
-                } else {
-                    println!("Please enter a valid number!");
+                io::stdin().read_line(&mut index)?;
+                
+                match index.trim().parse::<usize>() {
+                    Ok(idx) => {
+                        if let Err(e) = to_do_list.mark_complete(idx - 1) {
+                            println!("{}", e);
+                        }
+                    }
+                    Err(_) => println!("Please enter a valid number!"),
                 }
             }
             "5" => {
-                to_do_list.save_to_file();
+                if let Err(e) = to_do_list.save_to_file(FILENAME) {
+                    eprintln!("Error saving tasks: {}", e);
+                }
             }
             "6" => {
                 to_do_list.sort_by_completion();
@@ -256,9 +257,7 @@ fn main() {
             "7" => {
                 println!("Enter the due date to filter tasks (YYYY-MM-DD):");
                 let mut due_date = String::new();
-                io::stdin()
-                    .read_line(&mut due_date)
-                    .expect("Failed to read due date");
+                io::stdin().read_line(&mut due_date)?;
                 to_do_list.filter_by_due_date(due_date.trim());
             }
             "8" => {
@@ -267,9 +266,7 @@ fn main() {
             "9" => {
                 println!("Enter the keyword to search tasks:");
                 let mut keyword = String::new();
-                io::stdin()
-                    .read_line(&mut keyword)
-                    .expect("Failed to read keyword");
+                io::stdin().read_line(&mut keyword)?;
                 to_do_list.search_tasks(keyword.trim());
             }
             "10" => {
@@ -279,4 +276,6 @@ fn main() {
             _ => println!("Invalid option, please try again!"),
         }
     }
+
+    Ok(())
 }
